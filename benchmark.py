@@ -1,104 +1,120 @@
 #!/usr/bin/env python
 
+import concurrent.futures
+import logging
 import os
 import random
 import subprocess
 import tempfile
+import timeit
+import time
 
-_NUM_COMMITS = 4000000
-_NUM_FILES = 1300000
+_NUM_COMMITS = 5
+_NUM_USERS = 10
+_NUM_FILES = 5
 
-_GIT = '~/repos/git/git'
-_TARGET_DIR = '/media/c2c7372d-23b1-44d7-be77-218199273272/scratch/stress-test'
+_TARGET_PROJECT = 'git@git.pst.asseco.com:testing/stress-testing.git'
+_TARGET_DIRECTORY = 'c:\\Users\\10000102\\dev\\asseco\\git-stress-test\\tests'
 
-class File(object):
-  def __init__(self):
-    with open('nouns.txt') as fh:
-      self.nouns = [line.strip() for line in fh.readlines()]
-
-  def create(self, name):
-    with open(name, 'w') as fh:
-      for i in range(10):
-        to_write = ''
-        for j in range(random.randrange(5, 21)):
-          k = random.randrange(0, len(self.nouns))
-          to_write += self.nouns[k]
-          to_write += ' '
-        to_write += '\n'
-        fh.write(to_write)
-
-  def modify(self, name):
-    lines = list()
-    with open(name, 'r') as fh:
-      lines = fh.readlines()
-
-    first_line_to_modify, second_line_to_modify =\
-        sorted(random.sample(range(len(lines)), 2))
-
-    first_line = self._modify_line(first_line_to_modify, lines)
-    second_line = self._modify_line(second_line_to_modify, lines)
-
-    with open(name, 'w') as fh:
-      for i in range(len(lines)):
-        if i == first_line_to_modify:
-          fh.write(first_line)
-        elif i == second_line_to_modify:
-          fh.write(second_line)
-        else:
-          fh.write(lines[i])
-
-  def _modify_line(self, line_index, lines):
-    line = lines[line_index]
-    seek_point = random.randrange(len(line))
-    to_write = line[:seek_point]
-    for j in range(random.randrange(5, 21)):
-      k = random.randrange(0, len(self.nouns))
-      to_write += self.nouns[k]
-      to_write += ' '
-    to_write += line[seek_point:]
-    return to_write
 
 def random_file(directory):
-  try:
-    files = [os.path.join(path, filename)
-             for path, dirs, files in os.walk(directory)
-             for filename in files
-             if '.git' not in path]
+    try:
+        files = [os.path.join(path, filename)
+                 for path, dirs, files in os.walk(directory)
+                 for filename in files
+                 if '.git' not in path]
 
-    return random.choice(files)
-  except IndexError:
-    return None
+        return random.choice(files)
+    except IndexError:
+        return None
 
-subprocess.Popen('rm -rf %s' % _TARGET_DIR, shell=True).wait()
-subprocess.Popen('mkdir %s' % _TARGET_DIR, shell=True).wait()
-fm = File()
-os.chdir(_TARGET_DIR)
-subprocess.Popen('git init', shell=True).wait()
-# Until we have 4 million commits.
-for commit in range(_NUM_COMMITS):
-  # Queue tasks to do.
-  tasks = list()
 
-  # Tasks modify 2-5 files, create a file occasionally.
-  for i in range(random.randrange(2, 6)):
-    r_file = random_file('%s' % _TARGET_DIR)
-    if not r_file or random.randrange(0, 10) <= 2:
-      temp = tempfile.NamedTemporaryFile(dir=_TARGET_DIR, delete=False)
-      tasks.append(('CREATED', temp.name))
-    else:
-      tasks.append(('MODIFY', r_file))
+def run_commits(git_user):
+    logging.info("Waiting %s seconds to start", git_user)
+    time.sleep(git_user)
 
-  # Execute tasks
-  for task in tasks:
-    if 'CREATED' == task[0]:
-      # write lines into the file
-      fm.create(task[1])
-      subprocess.Popen('git add %s' % task[1], shell=True).wait()
-    elif 'MODIFY' == task[0]:
-      # Modify means change exist lines and add a few lines at the end filled with
-      # dictionary words.
-      fm.modify(task[1])
+    user_directory = '{}\\user_{}'.format(_TARGET_DIRECTORY, git_user)
+    logging.info("Thread %s: starting", user_directory)
 
-  subprocess.Popen('git commit --quiet -am \'Commit number %d.\'' % commit, shell=True).wait()
+    logging.info("Creating the user directory for %s", user_directory)
+    subprocess.run('mkdir {}'.format(user_directory), shell=True)
 
-# Commit.
+    logging.info("Cloning the project for %s", user_directory)
+    subprocess.run('git clone {} {}'.format(_TARGET_PROJECT, user_directory), shell=True)
+
+    logging.info("Creating commits for %s", user_directory)
+
+    for commit in range(_NUM_COMMITS):
+        logging.info("Clearing unsubmitted previous commit files")
+
+        subprocess.run('git reset --hard', shell=True)
+        subprocess.run('git pull', shell=True)
+
+        logging.info("Starting commit %s for %s", commit, user_directory)
+
+        # Queue tasks to do.
+        tasks = list()
+
+        logging.info("Generating tasks for commit %s of %s", commit, user_directory)
+        for i in range(_NUM_FILES):
+            r_file = random_file(user_directory)
+
+            if not r_file or i < (_NUM_FILES / 2):
+                temp = tempfile.NamedTemporaryFile(dir=user_directory, delete=False)
+                tasks.append(('CREATED', temp.name))
+            else:
+                tasks.append(('DELETED', r_file))
+
+        logging.info("Executing tasks for commit %s of %s", commit, user_directory)
+        # Execute tasks
+        for task in tasks:
+            if 'CREATED' == task[0]:
+                logging.info("Creating file %s for %s", task[1], user_directory)
+
+                # write lines into the file
+                with open(task[1], 'wb') as file:
+                    file.write(os.urandom(1024))
+                    file.close()
+                logging.info("Entering the directory %s", user_directory)
+                os.chdir(user_directory)
+
+                subprocess.Popen('git add {}'.format(task[1]), shell=True).wait()
+            elif 'DELETED' == task[0]:
+                logging.info("Deleting file %s for %s", task[1], user_directory)
+                subprocess.run('rm {}'.format(task[1]), shell=True)
+
+        logging.info("Commiting %s for %s", commit, user_directory)
+        start_commit = timeit.timeit()
+
+        logging.info("Entering the directory %s", user_directory)
+        os.chdir(user_directory)
+
+        subprocess.run('git commit --quiet --all --message="Commit number {}."'.format(commit), shell=True)
+        logging.info("Finished commit %s for %s", commit, user_directory)
+
+        logging.info("Pushing commit %s for %s", commit, user_directory)
+        subprocess.run('git pull', shell=True)
+        subprocess.run('git push', shell=True)
+        logging.info("Finished push for commit %s for %s", commit, user_directory)
+
+        end_commit = timeit.timeit()
+        logging.info("Commit & push for commit %s of %s took %s seconds", commit, user_directory, end_commit - start_commit)
+
+
+subprocess.run('rm -rf {}'.format(_TARGET_DIRECTORY), shell=True)
+subprocess.run('mkdir {}'.format(_TARGET_DIRECTORY), shell=True)
+
+os.chdir(_TARGET_DIRECTORY)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("debug.log"),
+        logging.StreamHandler()
+    ]
+)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=_NUM_USERS) as executor:
+    results = executor.map(run_commits, range(_NUM_USERS))
+    for result in list(results):
+        logging.info("Finished thread %s", result)
